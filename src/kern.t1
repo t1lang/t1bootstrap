@@ -1,0 +1,170 @@
+# T1 kernel.
+
+namespace std
+
+: drop2 <export> (object object)
+    drop drop ;
+
+# "case" is used as follows:
+#
+#   case
+#       val1 of do-something-1 endof
+#       val2 of do-something-2 endof
+#       val3 of do-something-3 endof
+#       do-something-4
+#   endcase
+#
+# Upon entry, the TOS is x. Each "of" clause will duplicate x and make an
+# "=" comparison; if true, then the contents (do-something-*) are executed.
+# The value x is dropped before executing the contents. After execution,
+# the CPU jumps to just after "endcase".
+#
+# Clauses are executed in-order. If none matches, then "do-something-4"
+# will be executed; at that point, x is still the TOS. IMPORTANT: the
+# "endcase" includes an implicit "drop", so "do-something-4" must account
+# for it, e.g. by pushing a dummy constant value.
+: case <export> <immediate> ()
+    0 ;
+: of <export> <immediate> ()
+    ++ 'over '= 'if 'drop ;
+: endof <export> <immediate> ()
+    'else ;
+: endcase <export> <immediate> ()
+    'drop
+    begin dup 0 <> while -- 'then repeat drop ;
+
+# Run a nested interpreter, stopping on the matching closing parenthesis.
+# The stack contents of that interpreter are then compiled as literal
+# constants in the current function.
+: ( <export> <immediate> ()
+    ")" run-interpreter
+    dup length 0 ->{ a n i }
+    begin i n < while
+        i a @ literal
+        i ++ ->i
+    repeat ;
+
+# std::string should be an alias on (std::u8 std::array). Right now we
+# use a wrapper function that returns the right type.
+: string <export> ()
+    (u8 array) ;
+
+# Defining a new type.
+: struct <export> <immediate> ()
+    next-token to-complete-name start-struct
+    false ->{ exported }
+    next-token
+    dup "<export>" = if
+        drop true ->exported next-token
+    then
+    begin
+        case
+            "end" of exported end-struct ret endof
+            "&&" of parse-single-type add-struct-extend endof
+            to-complete-name parse-type add-struct-element
+            0 # to satisfy the "drop" in "endcase"
+        endcase
+        next-token
+    again ;
+
+# Parse a type: this returns a boolean (true for embedding, false otherwise)
+# and an array of objects (type definition).
+: parse-type ()
+    false
+    next-token
+    dup "&&" = if
+        drop2 true next-token
+    then
+    parse-type-next ;
+
+# Parse a type; fail if it is a sequence. Returned value is the type
+# instance.
+: parse-single-type ()
+    next-token parse-type-next
+    dup length 1 <> if "cannot extend a sequence" fail then
+    0 swap @ ;
+
+# Parse a type, excluding an "embed" token. First token should have been
+# already read.
+: parse-type-next (string)
+    0 (object array) new make
+    swap
+    begin
+        dup "(" = if
+            drop ")" run-interpreter concat
+        else
+            to-type-element
+            1 (object array) new make ->{a}
+            0 a ->@
+            a concat
+        then
+        dup check-type-elements if ret then
+        next-token
+    again ;
+
+# Defining typed local variables and instances.
+: local <export> <immediate> ()
+    begin
+        next-token  # new local element name
+        dup "end" = if drop ret then
+        parse-type define-typed-local
+    again ;
+
+# Native functions used by this code (not exported):
+#
+#   next-token ( -- token )
+#       Parses the next token; pushes it as a string. The token is
+#       interpreted: escape sequences are replaced in character
+#       constants and literal strings; if the token is a literal
+#       string, the returned value is a double-quote followed by
+#       the string contents.
+#
+#   to-complete-name ( token -- name )
+#       If the provided token is a literal string token, then the string
+#       contents are returned (i.e. the leading double-quote is
+#       removed). Otherwise, if the token is a literal constant, then an
+#       exception is thrown. Otherwise, the token is a name, and it is
+#       interpreted and completed according to the currently defined
+#       aliases, and the current namespace.
+#
+#   start-struct ( name -- )
+#       Start a new structure definition. An internal stack of structure
+#       definitions is maintained, so that nested definitions are
+#       possible.
+#
+#   end-struct ( -- )
+#       Exits the current struct definition.
+#
+#   to-type-element ( token -- obj )
+#       If the provided value is a literal string token, then the type
+#       whose name is the string contents is looked up and returned.
+#       Otherwise, if the token is a literal constant, then it is parsed
+#       and returned. Otherwise, the token must be a name, which is
+#       completed according to the current namespace and aliases, and
+#       then looked up as a type, which is returned.
+#
+#   check-type-element ( array -- bool )
+#       This function returns true if the array contains either a single
+#       type, or an integer followed by a type. The function returns false
+#       if the array is empty or if it contains a single integer. In all
+#       other cases, an exception is thrown.
+#
+#   concat ( a b -- c )
+#       This functions concatenates two arrays of std::object into a new
+#       std::object array.
+#
+#   add-struct-element ( name embed array -- )
+#       Add an element to a struct (name, embed flag, element type).
+#
+#   add-struct-extend ( type -- )
+#       Add an extended element to a structure.
+#
+#   run-interpreter ( token -- array )
+#       Run a nested interpreter up to the next instance of the specified
+#       token. The stack contents are returned as an array of objects.
+#
+#   define-typed-local ( name embedFlag array -- )
+#       Define a new typed local; 'embedFlag' is true for a local
+#       instance (or array thereof), false for references. The 'array'
+#       is a sequence of 'int' (array dimensions) ended by the element
+#       type.
